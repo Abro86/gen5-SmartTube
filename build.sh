@@ -19,6 +19,7 @@
 # use the same key, or installs over an older one fail and NEMESIS reinstalls
 # (wiping SmartTube's data and sign-in). The signer must match
 # SIGNING_CERT_SHA256 in smarttube.conf.
+# Fork builds must pass tools/verify_fork.py before and after rebuilding.
 set -euo pipefail
 
 SRC_APK=${1:?usage: build.sh <upstream apk> <revision> [notes file]}
@@ -68,7 +69,9 @@ trap 'rm -rf "$work"' EXIT
 
 # Patch
 "$APKTOOL" d -f -o "$work/src" "$SRC_APK" >/dev/null
+python3 -I "$HERE/tools/verify_fork.py" --source "$HERE"
 python3 -I "$HERE/tools/patch.py" "$work/src" "$code" "$url"
+python3 -I "$HERE/tools/verify_fork.py" --decoded "$work/src" --url "$url"
 "$APKTOOL" b -o "$work/unsigned.apk" "$work/src" >/dev/null
 "$BT/zipalign" -f -p 4 "$work/unsigned.apk" "$work/aligned.apk"
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$KEY_ALIAS" --ks-pass "$KS_PASS" \
@@ -78,6 +81,7 @@ rm -f "$work/SmartTube.apk.idsig"
 # Check the result, not just that the patch script ran
 certs=$("$BT/apksigner" verify --min-sdk-version 19 --print-certs "$work/SmartTube.apk" 2>/dev/null) \
     || die "signature doesn't verify for API 19"
+[[ $SIGNING_CERT_SHA256 =~ ^[0-9a-f]{64}$ ]] || die "a pinned signing certificate is required"
 if [ -n "$SIGNING_CERT_SHA256" ]; then
     grep -qi "certificate SHA-256 digest: $SIGNING_CERT_SHA256\$" <<< "$certs" \
         || die "signed with the wrong key (expected certificate SHA-256 $SIGNING_CERT_SHA256)"
@@ -88,6 +92,10 @@ grep -q "uses-permission: name='android.permission.GET_TASKS'" <<< "$out_badging
 urls=$("$BT/aapt" dump --values resources "$work/SmartTube.apk" | python3 -I "$HERE/tools/resource_array.py" update_urls) \
     || die "update_urls missing from the built APK"
 [ "$urls" = "$url" ] || die "update_urls is '$urls', expected '$url'"
+
+# Check the rebuilt APK as well, before publishing any package.
+"$APKTOOL" d -f -o "$work/verified" "$work/SmartTube.apk" >/dev/null
+python3 -I "$HERE/tools/verify_fork.py" --decoded "$work/verified" --url "$url"
 
 # Package
 stage=$work/package

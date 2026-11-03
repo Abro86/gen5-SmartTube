@@ -1,2 +1,10 @@
 .cache/
 dist/
+
+# Private signing material must never enter this repository.
+*.jks
+*.p12
+*.keystore
+pass.txt
+__pycache__/
+build-provenance.json

@@ -1,132 +1,110 @@
-name: release
-
-# Push a tag v<upstream version>-gen5w.<rev>, e.g. v32.68-gen5w.3, to build that
-# upstream release with revision <rev>, sign it, and publish a GitHub release.
-# An annotated tag's message becomes the release's "Changes" section and the
-# in-app changelog.
+name: Build fork candidate
 on:
-  push:
-    tags: ["v*-gen5w.*"]
-
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Stable SmartTube tag (blank checks latest)
+        required: false
+        default: ''
+      revision:
+        description: Fork revision, 51-99
+        required: false
+        default: '51'
+  schedule:
+    - cron: '23 15 * * 2,5'
 permissions:
   contents: read
-
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
 env:
-  APKTOOL_VERSION: "2.12.0"
+  APKTOOL_VERSION: '2.12.0'
   APKTOOL_SHA256: effb69dab2f93806cafc0d232f6be32c2551b8d51c67650f575e46c016908fdd
-
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      needed: ${{ steps.prepare.outputs.needed }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      version: ${{ steps.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Parse tag
-        id: tag
-        run: |
-          tag=${GITHUB_REF_NAME}
-          ver=${tag#v}; ver=${ver%-gen5w.*}; rev=${tag##*-gen5w.}
-          [[ $ver =~ ^[0-9][0-9.]*$ && $rev =~ ^[0-9]+$ ]] || { echo "::error::tag must look like v32.68-gen5w.3"; exit 1; }
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-          # Annotated tag message, if any (a lightweight tag has none).
-          git fetch --no-tags --force origin "refs/tags/$tag:refs/tags/$tag"
-          if [ "$(git cat-file -t "refs/tags/$tag")" = tag ]; then
-            git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$tag" > "$RUNNER_TEMP/notes.txt"
-          else
-            : > "$RUNNER_TEMP/notes.txt"
-          fi
-
-      - name: Install apktool
+        with:
+          persist-credentials: false
+      - name: Test fork contract
+        run: python3 -m unittest discover -s tests -v
+      - name: Select upstream and check port changes
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_REVISION: ${{ inputs.revision }}
+        run: python3 tools/prepare_release.py
+      - name: Install build tools
+        if: steps.prepare.outputs.needed == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL -o "$RUNNER_TEMP/bin/apktool.jar" \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v$APKTOOL_VERSION/apktool_$APKTOOL_VERSION.jar"
+          curl -fsSL -o "$RUNNER_TEMP/bin/apktool.jar" "https://github.com/iBotPeaches/Apktool/releases/download/v$APKTOOL_VERSION/apktool_$APKTOOL_VERSION.jar"
           echo "$APKTOOL_SHA256  $RUNNER_TEMP/bin/apktool.jar" | sha256sum -c -
           printf '#!/bin/sh\nexec java -jar "%s" "$@"\n' "$RUNNER_TEMP/bin/apktool.jar" > "$RUNNER_TEMP/bin/apktool"
           chmod +x "$RUNNER_TEMP/bin/apktool"
           echo "APKTOOL=$RUNNER_TEMP/bin/apktool" >> "$GITHUB_ENV"
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0" > /dev/null
-
-      - name: Fetch upstream APK
-        id: upstream
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'build-tools;36.0.0' > /dev/null
+      - name: Download verified upstream APK
+        if: steps.prepare.outputs.needed == 'true'
+        id: apk
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # Upstream tags stable releases "<ver>s" (and sometimes just "<ver>").
-          for t in "${{ steps.tag.outputs.ver }}s" "${{ steps.tag.outputs.ver }}"; do
-            if apk=$(tools/fetch-upstream.sh "$t"); then
-              echo "apk=$apk" >> "$GITHUB_OUTPUT"
-              echo "tag=$t" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-          echo "::error::no upstream stable release found for ${{ steps.tag.outputs.ver }}"
-          exit 1
-
-      - name: Build and sign
+          UPSTREAM_TAG: ${{ steps.prepare.outputs.upstream_tag }}
+        run: echo "path=$(tools/fetch-upstream.sh "$UPSTREAM_TAG")" >> "$GITHUB_OUTPUT"
+      - name: Build, sign and verify APK
+        if: steps.prepare.outputs.needed == 'true'
         env:
           SMARTTUBE_KEYSTORE_B64: ${{ secrets.SMARTTUBE_KEYSTORE_B64 }}
           SMARTTUBE_KEY_PASS: ${{ secrets.SMARTTUBE_KEY_PASS }}
+          UPSTREAM_APK: ${{ steps.apk.outputs.path }}
+          FORK_REVISION: ${{ steps.prepare.outputs.revision }}
         run: |
-          [ -n "$SMARTTUBE_KEYSTORE_B64" ] && [ -n "$SMARTTUBE_KEY_PASS" ] \
-            || { echo "::error::SMARTTUBE_KEYSTORE_B64 and SMARTTUBE_KEY_PASS secrets are required"; exit 1; }
+          [ -n "$SMARTTUBE_KEYSTORE_B64" ] && [ -n "$SMARTTUBE_KEY_PASS" ] || { echo '::error::Fork signing secrets required'; exit 1; }
           export SMARTTUBE_KEYSTORE=$RUNNER_TEMP/key/smarttube.jks
           mkdir -m 700 "$RUNNER_TEMP/key"
           trap 'rm -rf "$RUNNER_TEMP/key"' EXIT
           base64 -d <<< "$SMARTTUBE_KEYSTORE_B64" > "$SMARTTUBE_KEYSTORE"
-          notes=; [ -s "$RUNNER_TEMP/notes.txt" ] && notes=$RUNNER_TEMP/notes.txt
-          ./build.sh "${{ steps.upstream.outputs.apk }}" "${{ steps.tag.outputs.rev }}" $notes
-          # build.sh names the zip from the APK's own versionName; it must match the tag.
-          zip=smarttube-${{ steps.tag.outputs.ver }}-gen5w.${{ steps.tag.outputs.rev }}.zip
-          [ -f "dist/$zip" ] || { echo "::error::expected dist/$zip; tag and upstream version differ"; ls dist; exit 1; }
-
-      - name: Release notes
-        run: |
-          . ./smarttube.conf
-          python3 -I - .github/release-body.md "$RUNNER_TEMP/notes.txt" dist/release-body.md "$CODECS_MIN_VERSION" <<'EOF'
-          import sys
-          tmpl, notes, out, codecs_min = sys.argv[1:5]
-          body = open(tmpl).read()
-          changes = open(notes).read().strip()
-          subs = {
-              "@VERSION@": "${{ steps.tag.outputs.ver }}",
-              "@ZIP@": "smarttube-${{ steps.tag.outputs.ver }}-gen5w.${{ steps.tag.outputs.rev }}.zip",
-              "@USBZIP@": "smarttube-${{ steps.tag.outputs.ver }}-gen5w.${{ steps.tag.outputs.rev }}-usb.zip",
-              "@UPSTREAM_TAG@": "${{ steps.upstream.outputs.tag }}",
-              "@CODECS_MIN_VERSION@": codecs_min,
-              "@CHANGES@": f"\n**Changes in this build:**\n\n{changes}\n" if changes else "",
-          }
-          for k, v in subs.items():
-              body = body.replace(k, v)
-          open(out, "w").write(body)
-          EOF
-          cat dist/release-body.md
-
+          ./build.sh "$UPSTREAM_APK" "$FORK_REVISION"
+          cp build-provenance.json dist/
+          (cd dist && sha256sum *.zip *.apk *.json > SHA256SUMS)
       - uses: actions/upload-artifact@v7
+        if: steps.prepare.outputs.needed == 'true'
         with:
-          name: dist
+          name: fork-candidate
           path: dist/
           if-no-files-found: error
-
-  # Publishing is a separate job so the job holding the signing key never has
-  # write access to the repo.
-  release:
+          retention-days: 30
+  draft:
     needs: build
+    if: needs.build.outputs.needed == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: dist
+          name: fork-candidate
           path: dist
-      - name: Publish
+      - name: Save draft for vehicle validation
         env:
           GH_TOKEN: ${{ github.token }}
+          FORK_TAG: ${{ needs.build.outputs.tag }}
+          FORK_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          tag=${GITHUB_REF_NAME}
-          ver=${tag#v}; ver=${ver%-gen5w.*}; rev=${tag##*-gen5w.}
-          mv dist/release-body.md body.md
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --latest \
-            --title "SmartTube $ver for Gen5W (build $rev)" --notes-file body.md dist/*
+          cat > notes.txt <<'EOF'
+          Abro86's Gen5W SmartTube fork. Omits the application-level Park restriction; retains Gen5W compatibility fixes. Do not watch or operate video while driving.
+
+          Automated build checks passed. Vehicle playback, audio routing and preservation of other plugins remain untested. This is a draft candidate, not a vehicle-validated release.
+
+          Requires NEMESIS 1.16+ and media.codecs 2.1+. The NEMESIS ID is local.abro.smarttube; do not co-install another SmartTube package. Switching signing keys can reset SmartTube settings/sign-in. Subsequent fork builds use the same key.
+
+          Install through NEMESIS after backups and current protected-session validation. No automatic car install. Verify SHA256SUMS. Source/APK provenance is in build-provenance.json.
+          EOF
+          gh release create "$FORK_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --title "SmartTube $FORK_VERSION - Abro fork candidate" --notes-file notes.txt dist/*
