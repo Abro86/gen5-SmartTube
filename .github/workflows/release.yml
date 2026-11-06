@@ -7,9 +7,9 @@ on:
         required: false
         default: ''
       revision:
-        description: Fork revision, 51-99
+        description: Fork revision, 51-99 (blank uses reviewed revision)
         required: false
-        default: '51'
+        default: ''
   schedule:
     - cron: '23 15 * * 2,5'
 permissions:
@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - name: Test fork contract
         run: python3 -m unittest discover -s tests -v
+      - name: Exercise modem guard in a private network namespace
+        run: sudo unshare --net -- bash tests/netguard.sh
       - name: Select upstream and check port changes
         id: prepare
         env:
@@ -104,6 +106,8 @@ jobs:
           Automated build checks passed. Vehicle playback, audio routing and preservation of other plugins remain untested. This is a draft candidate, not a vehicle-validated release.
 
           Requires NEMESIS 1.16+ and media.codecs 2.1+. The NEMESIS ID is local.abro.smarttube; do not co-install another SmartTube package. Switching signing keys can reset SmartTube settings/sign-in. Subsequent fork builds use the same key.
+
+          Install the NEMESIS ZIP to get the modem guard. It filters SmartTube traffic on IPv4 and IPv6 while allowing Wi-Fi and Bluetooth/USB tethering. The APK alone cannot install this service.
 
           Install through NEMESIS after backups and current protected-session validation. No automatic car install. Verify SHA256SUMS. Source/APK provenance is in build-provenance.json.
           EOF

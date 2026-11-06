@@ -52,6 +52,17 @@ SmartTube's built-in APK installer.
 
 ## Installation and recovery
 
+Revision 52 includes KramerTech's per-app modem guard from commit
+`6b56e7610eb3615ac40274e2805f7741700c43ea`. The NEMESIS package starts
+a root service that filters outbound IPv4 and IPv6 traffic by SmartTube's
+Android UID. It permits loopback, Wi-Fi and Bluetooth/USB tethering. Connections
+over the built-in modem are blocked once the rules are active. System DNS
+uses its own UID. Install the package ZIP to get the service.
+
+NEMESIS runs a cleanup hook before update or removal. Cleanup requires firewall
+privileges. When an uninstall runs with reduced ADB capabilities, a full head-unit
+reboot clears residual rules.
+
 Back up the head unit's current affected files and settings first. Install the
 codec dependency before the SmartTube package through supported NEMESIS methods.
 Use the plain package ZIP for `nemesis install --update`; the `-usb.zip` is a
